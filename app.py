@@ -1,117 +1,150 @@
-from flask import Flask, request, redirect, url_for, render_template_string, session, flash
+from flask import Flask, request, redirect, url_for, render_template_string, session
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+import mysql.connector
 import os
 
 app = Flask(__name__)
 app.secret_key = "uma-chave-secreta-muito-segura"
 
-# Dicionário de votos
-votos = {
-    "Partido A": 0,
-    "Partido B": 0,
-    "Partido C": 0,
-    "Abstenções": 0
+# Config MySQL (troque pelos seus dados)
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'seu_usuario',
+    'password': 'sua_senha',
+    'database': 'votacao_db',
+    'auth_plugin': 'mysql_native_password'
 }
 
-# Usuários cadastrados: email -> senha (para simplificar, em memória)
-# Você pode carregar de arquivo se quiser, mas aqui só o cadastro novo salva email em arquivo.
-usuarios = {}
+def get_db():
+    return mysql.connector.connect(**DB_CONFIG)
 
-USUARIOS_TXT = "usuarios.txt"
+def criar_tabelas():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS usuarios (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        senha VARCHAR(255) NOT NULL
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS votos (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        partido VARCHAR(50) NOT NULL,
+        horario DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_voto_email (email)
+    );
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
 
-# Função para carregar usuários do arquivo usuarios.txt (se quiser carregar ao iniciar)
-def carregar_usuarios():
-    if os.path.exists(USUARIOS_TXT):
-        with open(USUARIOS_TXT, "r") as f:
-            for linha in f:
-                email = linha.strip()
-                if email:
-                    usuarios[email] = "senha123"  # Coloque senha padrão ou mude conforme seu uso
-
-carregar_usuarios()
-
-def salvar_email(email):
-    with open(USUARIOS_TXT, "a") as f:
-        f.write(email + "\n")
+criar_tabelas()
 
 def dentro_do_horario():
     agora = datetime.now().time()
     return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
 
-@app.route("/cadastro", methods=["GET", "POST"])
-def cadastro():
-    if request.method == "POST":
-        email = request.form.get("email").strip().lower()
-        senha = request.form.get("senha")
-        senha_conf = request.form.get("senha_conf")
+def usuario_ja_votou(email):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM votos WHERE email = %s", (email,))
+    ja_votou = cursor.fetchone() is not None
+    cursor.close()
+    conn.close()
+    return ja_votou
 
-        if not email or not senha or not senha_conf:
-            flash("Preencha todos os campos.")
-        elif senha != senha_conf:
-            flash("As senhas não coincidem.")
-        elif email in usuarios:
-            flash("Email já cadastrado.")
-        else:
-            usuarios[email] = senha
-            salvar_email(email)
-            flash("Cadastro realizado! Faça login.")
-            return redirect(url_for("login"))
+def salvar_voto(email, partido):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO votos (email, partido) VALUES (%s, %s)", (email, partido))
+        conn.commit()
+    except mysql.connector.errors.IntegrityError:
+        # Tentou votar duas vezes, ignore ou trate
+        pass
+    cursor.close()
+    conn.close()
+
+def contar_votos():
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+    SELECT partido, COUNT(*) as total FROM votos
+    GROUP BY partido
+    """)
+    resultados = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    votos_contagem = {"Partido A": 0, "Partido B": 0, "Partido C": 0, "Abstenções": 0}
+    for row in resultados:
+        if row['partido'] in votos_contagem:
+            votos_contagem[row['partido']] = row['total']
+    return votos_contagem
+
+@app.route("/")
+def home():
+    if session.get("email"):
+        return redirect(url_for("votacao"))
+    return redirect(url_for("login"))
+
+@app.route("/registro", methods=["GET", "POST"])
+def registro():
+    if request.method == "POST":
+        email = request.form.get("email")
+        senha = request.form.get("senha")
+        if not email or not senha:
+            return "Preencha email e senha", 400
+        senha_hash = generate_password_hash(senha)
+        conn = get_db()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha_hash))
+            conn.commit()
+        except mysql.connector.errors.IntegrityError:
+            cursor.close()
+            conn.close()
+            return "Email já cadastrado.", 400
+        cursor.close()
+        conn.close()
+        return redirect(url_for("login"))
     return render_template_string("""
-    <!DOCTYPE html>
-    <html><head><title>Cadastro</title></head><body>
-    <h1>Cadastro</h1>
-    {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        <ul style="color:red;">
-          {% for msg in messages %}
-            <li>{{ msg }}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
-    {% endwith %}
+    <h2>Registro</h2>
     <form method="POST">
       Email: <input type="email" name="email" required><br><br>
       Senha: <input type="password" name="senha" required><br><br>
-      Confirme a senha: <input type="password" name="senha_conf" required><br><br>
-      <button type="submit">Cadastrar</button>
+      <button type="submit">Registrar</button>
     </form>
-    <p>Já tem cadastro? <a href="{{ url_for('login') }}">Login aqui</a></p>
-    </body></html>
+    <a href="{{ url_for('login') }}">Já tem conta? Faça login</a>
     """)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = request.form.get("email").strip().lower()
+        email = request.form.get("email")
         senha = request.form.get("senha")
-
-        if email in usuarios and usuarios[email] == senha:
-            session["usuario"] = email
-            session["ja_votou"] = False  # reseta votação ao logar
-            return redirect(url_for("index"))
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM usuarios WHERE email = %s", (email,))
+        usuario = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if usuario and check_password_hash(usuario["senha"], senha):
+            session["email"] = email
+            return redirect(url_for("votacao"))
         else:
-            flash("Email ou senha incorretos.")
-
+            return "Credenciais inválidas", 401
     return render_template_string("""
-    <!DOCTYPE html>
-    <html><head><title>Login</title></head><body>
-    <h1>Login</h1>
-    {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        <ul style="color:red;">
-          {% for msg in messages %}
-            <li>{{ msg }}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
-    {% endwith %}
+    <h2>Login</h2>
     <form method="POST">
       Email: <input type="email" name="email" required><br><br>
       Senha: <input type="password" name="senha" required><br><br>
       <button type="submit">Entrar</button>
     </form>
-    <p>Não tem cadastro? <a href="{{ url_for('cadastro') }}">Cadastre-se aqui</a></p>
-    </body></html>
+    <a href="{{ url_for('registro') }}">Não tem conta? Registre-se</a>
     """)
 
 @app.route("/logout")
@@ -119,82 +152,72 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if "usuario" not in session:
+@app.route("/votacao", methods=["GET", "POST"])
+def votacao():
+    if not session.get("email"):
         return redirect(url_for("login"))
 
-    if session.get("ja_votou"):
+    if usuario_ja_votou(session["email"]):
+        session["ja_votou"] = True
         return redirect(url_for("resultado"))
 
-    fora_do_horario = not dentro_do_horario()
+    if not dentro_do_horario():
+        return render_template_string("""
+        <h1>Votação</h1>
+        <p style="color:red;">A votação está disponível apenas entre 08:00 e 20:00.</p>
+        <p>Usuário logado: {{ email }}</p>
+        <a href="{{ url_for('logout') }}">Logout</a>
+        """, email=session["email"])
 
     if request.method == "POST":
         voto = request.form.get("voto")
-        if voto in votos:
-            votos[voto] += 1
+        if voto in ["Partido A", "Partido B", "Partido C", "Abstenções"]:
+            salvar_voto(session["email"], voto)
             session["ja_votou"] = True
             return redirect(url_for("resultado"))
 
     return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Votação</title></head>
-    <body>
-        <h1>Sistema de Votação</h1>
-        <p>Usuário logado: <strong>{{ usuario }}</strong> | <a href="{{ url_for('logout') }}">Sair</a></p>
-
-        {% if fora_do_horario %}
-            <p style="color: red;">Votação disponível apenas entre 08:00 e 20:00.</p>
-        {% else %}
-            <form method="POST">
-                <button type="submit" name="voto" value="Partido A">Votar no Partido A</button><br><br>
-                <button type="submit" name="voto" value="Partido B">Votar no Partido B</button><br><br>
-                <button type="submit" name="voto" value="Partido C">Votar no Partido C</button><br><br>
-                <button type="submit" name="voto" value="Abstenções">Abster-se</button>
-            </form>
-        {% endif %}
-
-        <br><br>
-        <a href="{{ url_for('resultado') }}">Ver resultado parcial / final</a>
-    </body>
-    </html>
-    """, fora_do_horario=fora_do_horario, usuario=session["usuario"])
+    <h1>Votação</h1>
+    <p>Usuário logado: {{ email }}</p>
+    <form method="POST">
+        <button type="submit" name="voto" value="Partido A">Votar Partido A</button><br><br>
+        <button type="submit" name="voto" value="Partido B">Votar Partido B</button><br><br>
+        <button type="submit" name="voto" value="Partido C">Votar Partido C</button><br><br>
+        <button type="submit" name="voto" value="Abstenções">Abster-se</button>
+    </form>
+    <br>
+    <a href="{{ url_for('logout') }}">Logout</a>
+    """, email=session["email"])
 
 @app.route("/resultado")
 def resultado():
-    if "usuario" not in session:
+    if not session.get("email"):
         return redirect(url_for("login"))
 
+    votos = contar_votos()
     max_votos = max(votos["Partido A"], votos["Partido B"], votos["Partido C"])
     vencedores = [p for p in ["Partido A", "Partido B", "Partido C"] if votos[p] == max_votos and max_votos > 0]
 
     return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Resultado da Votação</title></head>
-    <body>
-        <h1>Resultado Final</h1>
-        <p>Usuário logado: <strong>{{ usuario }}</strong> | <a href="{{ url_for('logout') }}">Sair</a></p>
-        <ul>
-            {% for partido, total in votos.items() %}
-                <li>{{ partido }}: {{ total }} voto(s)</li>
-            {% endfor %}
-        </ul>
+    <h1>Resultado</h1>
+    <ul>
+      {% for partido, total in votos.items() %}
+        <li>{{ partido }}: {{ total }} voto(s)</li>
+      {% endfor %}
+    </ul>
 
-        {% if vencedores|length == 0 %}
-            <p>Nenhum partido recebeu votos.</p>
-        {% elif vencedores|length == 1 %}
-            <p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
-        {% else %}
-            <p><strong>Empate entre: {{ vencedores | join(', ') }}</strong></p>
-        {% endif %}
+    {% if vencedores|length == 0 %}
+      <p>Nenhum partido recebeu votos.</p>
+    {% elif vencedores|length == 1 %}
+      <p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
+    {% else %}
+      <p><strong>Empate entre: {{ vencedores | join(', ') }}</strong></p>
+    {% endif %}
 
-        <br>
-        <p><a href="{{ url_for('index') }}">Voltar para votação</a></p>
-    </body>
-    </html>
-    """, votos=votos, vencedores=vencedores, usuario=session["usuario"])
+    <br>
+    <a href="{{ url_for('votacao') }}">Voltar para votação</a><br>
+    <a href="{{ url_for('logout') }}">Logout</a>
+    """, votos=votos, vencedores=vencedores)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

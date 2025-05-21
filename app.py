@@ -1,8 +1,9 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session
 from datetime import datetime
+import os  # Importante para pegar a porta no Render
 
 app = Flask(__name__)
-app.secret_key = "uma-chave-secreta-muito-segura"  # obrigatório para usar sessões
+app.secret_key = "uma-chave-secreta-muito-segura"  # Necessário para usar sessão
 
 # Dicionário de votos
 votos = {
@@ -12,13 +13,14 @@ votos = {
     "Abstenções": 0
 }
 
+# Função para verificar horário de votação
 def dentro_do_horario():
     agora = datetime.now().time()
     return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
 
+# Página de votação
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # Se usuário já votou, redireciona para resultado
     if session.get("ja_votou"):
         return redirect(url_for("resultado"))
 
@@ -28,7 +30,7 @@ def index():
         voto = request.form.get("voto")
         if voto in votos:
             votos[voto] += 1
-            session["ja_votou"] = True  # marca que votou
+            session["ja_votou"] = True
             return redirect(url_for("resultado"))
 
     return render_template_string("""
@@ -55,6 +57,7 @@ def index():
     </html>
     """, fora_do_horario=fora_do_horario)
 
+# Página de resultado
 @app.route("/resultado")
 def resultado():
     max_votos = max(votos["Partido A"], votos["Partido B"], votos["Partido C"])
@@ -86,5 +89,7 @@ def resultado():
     </html>
     """, votos=votos, vencedores=vencedores)
 
+# Execução corrigida para ambiente como Render
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))  # Pega a porta do ambiente (Render) ou usa 5000 localmente
+    app.run(host="0.0.0.0", port=port)

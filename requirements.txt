@@ -1,4 +1,1 @@
-flask
-mysql-connector-python
-werkzeug
-
+Flask==2.2.5

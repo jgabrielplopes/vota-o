@@ -1,1 +1,4 @@
-Flask==2.2.5
+flask
+mysql-connector-python
+werkzeug
+

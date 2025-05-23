@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session, abort
-from datetime import datetime, time
+from datetime import datetime
 import psycopg2
 import os
 
@@ -40,15 +40,15 @@ def criar_tabelas():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS opcoes (
             id SERIAL PRIMARY KEY,
-            votacao_id INTEGER REFERENCES votacoes(id) ON DELETE CASCADE,
+            votacao_id INTEGER REFERENCES votacoes(id),
             nome TEXT NOT NULL
         )
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS votos (
             id SERIAL PRIMARY KEY,
-            usuario_id INTEGER REFERENCES usuarios(id) ON DELETE CASCADE,
-            votacao_id INTEGER REFERENCES votacoes(id) ON DELETE CASCADE,
+            usuario_id INTEGER REFERENCES usuarios(id),
+            votacao_id INTEGER REFERENCES votacoes(id),
             opcao_id INTEGER REFERENCES opcoes(id),
             data_hora TIMESTAMP DEFAULT NOW(),
             UNIQUE(usuario_id, votacao_id)
@@ -59,19 +59,9 @@ def criar_tabelas():
 
 criar_tabelas()
 
-# Rota inicial - links para login/cadastro/admin
-@app.route("/")
-def home():
-    return render_template_string("""
-        <h2>Sistema de Votação</h2>
-        <p><a href="{{ url_for('login') }}">Login de Usuário</a></p>
-        <p><a href="{{ url_for('cadastro') }}">Cadastro de Usuário</a></p>
-        <p><a href="{{ url_for('admin_login') }}">Login de Administrador</a></p>
-    """)
-
-# Login usuário
-@app.route("/login", methods=["GET", "POST"])
-def login():
+# --- Rota para login ---
+@app.route("/", methods=["GET", "POST"])
+def index():
     if "usuario_id" in session:
         return redirect(url_for("lista_votacoes"))
     erro = None
@@ -80,18 +70,21 @@ def login():
         senha = request.form.get("senha")
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s AND is_admin = FALSE", (email, senha))
+        cur.execute("SELECT id, is_admin FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
         user = cur.fetchone()
         conn.close()
         if user:
             session["usuario_id"] = user[0]
             session["email"] = email
-            session["is_admin"] = False
-            return redirect(url_for("lista_votacoes"))
+            session["is_admin"] = user[1]
+            if user[1]:
+                return redirect(url_for("admin_dashboard"))
+            else:
+                return redirect(url_for("lista_votacoes"))
         else:
             erro = "Email ou senha incorretos."
     return render_template_string("""
-        <h2>Login Usuário</h2>
+        <h2>Login</h2>
         <form method="POST">
             Email: <input type="email" name="email" required><br>
             Senha: <input type="password" name="senha" required><br>
@@ -99,10 +92,9 @@ def login():
         </form>
         <p>Não tem conta? <a href="{{ url_for('cadastro') }}">Cadastrar-se</a></p>
         {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-        <p><a href="{{ url_for('home') }}">Voltar</a></p>
     """, erro=erro)
 
-# Cadastro usuário
+# --- Rota para cadastro ---
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
@@ -115,54 +107,186 @@ def cadastro():
             cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
             conn.commit()
             conn.close()
-            return redirect(url_for("login"))
+            return redirect(url_for("index"))
         except psycopg2.errors.UniqueViolation:
             erro = "Email já cadastrado."
     return render_template_string("""
-        <h2>Cadastro Usuário</h2>
+        <h2>Cadastro</h2>
         <form method="POST">
             Email: <input type="email" name="email" required><br>
             Senha: <input type="password" name="senha" required><br>
             <button type="submit">Cadastrar</button>
         </form>
-        <p>Já tem conta? <a href="{{ url_for('login') }}">Entrar</a></p>
+        <p>Já tem conta? <a href="{{ url_for('index') }}">Entrar</a></p>
         {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-        <p><a href="{{ url_for('home') }}">Voltar</a></p>
     """, erro=erro)
 
-# Login admin
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
-    if "usuario_id" in session and session.get("is_admin"):
-        return redirect(url_for("admin_dashboard"))
-    erro = None
-    if request.method == "POST":
-        email = request.form.get("email")
-        senha = request.form.get("senha")
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s AND is_admin = TRUE", (email, senha))
-        admin = cur.fetchone()
-        conn.close()
-        if admin:
-            session["usuario_id"] = admin[0]
-            session["email"] = email
-            session["is_admin"] = True
-            return redirect(url_for("admin_dashboard"))
-        else:
-            erro = "Email ou senha incorretos."
+# --- Rota para logout ---
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+# --- Rota para listar votações ativas para o usuário votar ---
+@app.route("/votacoes")
+def lista_votacoes():
+    if "usuario_id" not in session or session.get("is_admin"):
+        return redirect(url_for("index"))
+    agora = datetime.now()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, tema, inicio, fim FROM votacoes
+        WHERE inicio <= %s AND fim >= %s
+        ORDER BY inicio
+    """, (agora, agora))
+    votacoes_ativas = cur.fetchall()
+    conn.close()
     return render_template_string("""
-        <h2>Login Administrador</h2>
-        <form method="POST">
-            Email: <input type="email" name="email" required><br>
-            Senha: <input type="password" name="senha" required><br>
-            <button type="submit">Entrar</button>
-        </form>
-        {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-        <p><a href="{{ url_for('home') }}">Voltar</a></p>
-    """, erro=erro)
+        <h2>Votações Ativas</h2>
+        {% if votacoes_ativas %}
+            <ul>
+                {% for v in votacoes_ativas %}
+                    <li>
+                        <a href="{{ url_for('votar', votacao_id=v[0]) }}">{{ v[1] }}</a>
+                        ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>Não há votações ativas no momento.</p>
+        {% endif %}
+        <br><a href="{{ url_for('logout') }}">Sair</a>
+    """, votacoes_ativas=votacoes_ativas)
 
-# Dashboard admin
+# --- Rota para votar numa votacao específica ---
+@app.route("/votacao/<int:votacao_id>", methods=["GET", "POST"])
+def votar(votacao_id):
+    if "usuario_id" not in session or session.get("is_admin"):
+        return redirect(url_for("index"))
+
+    usuario_id = session["usuario_id"]
+    agora = datetime.now()
+
+    conn = get_db()
+    cur = conn.cursor()
+    # Verifica se votação existe e está ativa
+    cur.execute("SELECT tema, inicio, fim FROM votacoes WHERE id = %s", (votacao_id,))
+    votacao = cur.fetchone()
+    if not votacao:
+        conn.close()
+        return "Votação não encontrada.", 404
+    tema, inicio, fim = votacao
+    if agora < inicio or agora > fim:
+        conn.close()
+        return render_template_string("""
+            <h2>{{ tema }}</h2>
+            <p style="color:red">Esta votação está encerrada ou ainda não começou.</p>
+            <a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
+        """, tema=tema)
+
+    # Verifica se já votou nesta votação
+    cur.execute("SELECT id FROM votos WHERE usuario_id = %s AND votacao_id = %s", (usuario_id, votacao_id))
+    if cur.fetchone():
+        conn.close()
+        return redirect(url_for("resultado_votacao", votacao_id=votacao_id))
+
+    # Busca opções para votação
+    cur.execute("SELECT id, nome FROM opcoes WHERE votacao_id = %s", (votacao_id,))
+    opcoes = cur.fetchall()
+
+    if request.method == "POST":
+        opcao_id = request.form.get("opcao")
+        if opcao_id is None:
+            conn.close()
+            return render_template_string("""
+                <h2>{{ tema }}</h2>
+                <p style="color:red">Selecione uma opção para votar.</p>
+                <a href="{{ url_for('votar', votacao_id=votacao_id) }}">Voltar</a>
+            """, tema=tema, votacao_id=votacao_id)
+        # Confirma opção existe e pertence a essa votação
+        cur.execute("SELECT id FROM opcoes WHERE id = %s AND votacao_id = %s", (opcao_id, votacao_id))
+        if not cur.fetchone():
+            conn.close()
+            return "Opção inválida.", 400
+        # Insere voto
+        try:
+            cur.execute(
+                "INSERT INTO votos (usuario_id, votacao_id, opcao_id) VALUES (%s, %s, %s)",
+                (usuario_id, votacao_id, opcao_id)
+            )
+            conn.commit()
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            conn.close()
+            return "Você já votou nesta votação.", 400
+        conn.close()
+        return redirect(url_for("resultado_votacao", votacao_id=votacao_id))
+
+    conn.close()
+    return render_template_string("""
+        <h2>Votação: {{ tema }}</h2>
+        <form method="POST">
+            {% for opcao in opcoes %}
+                <input type="radio" id="opt{{ opcao[0] }}" name="opcao" value="{{ opcao[0] }}" required>
+                <label for="opt{{ opcao[0] }}">{{ opcao[1] }}</label><br>
+            {% endfor %}
+            <br><button type="submit">Votar</button>
+        </form>
+        <br><a href="{{ url_for('lista_votacoes') }}">Voltar</a>
+    """, tema=tema, opcoes=opcoes)
+
+# --- Rota para mostrar resultado de uma votação ---
+@app.route("/resultado/<int:votacao_id>")
+def resultado_votacao(votacao_id):
+    if "usuario_id" not in session:
+        return redirect(url_for("index"))
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT tema, inicio, fim FROM votacoes WHERE id = %s", (votacao_id,))
+    votacao = cur.fetchone()
+    if not votacao:
+        conn.close()
+        return "Votação não encontrada.", 404
+    tema, inicio, fim = votacao
+
+    # Busca opções e votos
+    cur.execute("""
+        SELECT op.nome, COUNT(v.id)
+        FROM opcoes op
+        LEFT JOIN votos v ON v.opcao_id = op.id
+        WHERE op.votacao_id = %s
+        GROUP BY op.nome
+        ORDER BY op.nome
+    """, (votacao_id,))
+    resultados = cur.fetchall()
+    conn.close()
+
+    # Calcula vencedor(es)
+    max_votos = max([r[1] for r in resultados]) if resultados else 0
+    vencedores = [r[0] for r in resultados if r[1] == max_votos and max_votos > 0]
+
+    return render_template_string("""
+        <h2>Resultado da Votação: {{ tema }}</h2>
+        <ul>
+        {% for nome, total in resultados %}
+            <li>{{ nome }}: {{ total }} voto(s)</li>
+        {% endfor %}
+        </ul>
+
+        {% if max_votos == 0 %}
+            <p>Nenhum voto registrado.</p>
+        {% elif vencedores|length == 1 %}
+            <p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
+        {% else %}
+            <p><strong>Empate entre: {{ vencedores | join(', ') }}</strong></p>
+        {% endif %}
+
+        <br><a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a> | <a href="{{ url_for('logout') }}">Sair</a>
+    """, tema=tema, resultados=resultados, vencedores=vencedores, max_votos=max_votos)
+
+# --- Rota do dashboard do administrador ---
 @app.route("/admin")
 def admin_dashboard():
     if not session.get("is_admin"):
@@ -173,22 +297,24 @@ def admin_dashboard():
     votacoes = cur.fetchall()
     conn.close()
     return render_template_string("""
-        <h2>Administração - Votações</h2>
-        <p><a href="{{ url_for('criar_votacao') }}">Criar nova votação</a></p>
-        <ul>
-            {% for id, tema, inicio, fim in votacoes %}
-                <li>
-                    <strong>{{ tema }}</strong> ({{ inicio }} até {{ fim }})
-                    - <a href="{{ url_for('ver_votacao_admin', votacao_id=id) }}">Detalhes</a>
+        <h2>Dashboard do Administrador</h2>
+        <p><a href="{{ url_for('criar_votacao') }}">Criar Nova Votação</a></p>
+        <h3>Votações Criadas</h3>
+        {% if votacoes %}
+            <ul>
+            {% for v in votacoes %}
+                <li>{{ v[1] }} ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})
+                    - <a href="{{ url_for('resultado_votacao', votacao_id=v[0]) }}">Ver Resultado</a>
                 </li>
-            {% else %}
-                <li>Nenhuma votação cadastrada.</li>
             {% endfor %}
-        </ul>
-        <p><a href="{{ url_for('logout') }}">Sair</a></p>
+            </ul>
+        {% else %}
+            <p>Nenhuma votação criada ainda.</p>
+        {% endif %}
+        <br><a href="{{ url_for('logout') }}">Sair</a>
     """, votacoes=votacoes)
 
-# Criar votação (admin)
+# --- Rota para criar nova votação ---
 @app.route("/admin/criar", methods=["GET", "POST"])
 def criar_votacao():
     if not session.get("is_admin"):
@@ -225,4 +351,14 @@ def criar_votacao():
         {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
         <form method="POST">
             Tema: <input type="text" name="tema" required><br>
-            Início: <input type
+            Início: <input type="datetime-local" name="inicio" required><br>
+            Fim: <input type="datetime-local" name="fim" required><br>
+            Opções (uma por linha):<br>
+            <textarea name="opcoes" rows="5" cols="30" required></textarea><br><br>
+            <button type="submit">Criar</button>
+        </form>
+        <p><a href="{{ url_for('admin_dashboard') }}">Voltar</a></p>
+    """, erro=erro)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

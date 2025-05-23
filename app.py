@@ -7,7 +7,6 @@ app = Flask(__name__)
 app.secret_key = "uma-chave-secreta-segura"
 
 # Configuração do PostgreSQL via variáveis de ambiente
-# Configuração do PostgreSQL com credenciais fixas
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "database": os.getenv("DB_NAME"),
@@ -162,7 +161,7 @@ def lista_votacoes():
         <br><a href="{{ url_for('logout') }}">Sair</a>
     """, votacoes_ativas=votacoes_ativas)
 
-# --- Rota para votar numa votação específica ---
+# --- Rota para votar numa votação específica (ATUALIZADA) ---
 @app.route("/votacao/<int:votacao_id>", methods=["GET", "POST"])
 def votar(votacao_id):
     if "usuario_id" not in session or session.get("is_admin"):
@@ -179,13 +178,23 @@ def votar(votacao_id):
         conn.close()
         return "Votação não encontrada.", 404
     tema, inicio, fim = votacao
-    if agora < inicio or agora > fim:
+
+    if agora < inicio:
         conn.close()
         return render_template_string("""
             <h2>{{ tema }}</h2>
-            <p style="color:red">Esta votação está encerrada ou ainda não começou.</p>
+            <p style="color:orange">Esta votação ainda não começou. Ela inicia em {{ inicio.strftime('%d/%m/%Y %H:%M') }}.</p>
             <a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
-        """, tema=tema)
+        """, tema=tema, inicio=inicio)
+
+    if agora > fim:
+        conn.close()
+        return render_template_string("""
+            <h2>{{ tema }}</h2>
+            <p style="color:red">Esta votação já foi encerrada em {{ fim.strftime('%d/%m/%Y %H:%M') }}.</p>
+            <a href="{{ url_for('resultado_votacao', votacao_id=votacao_id) }}">Ver resultado</a><br>
+            <a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
+        """, tema=tema, fim=fim, votacao_id=votacao_id)
 
     cur.execute("SELECT id FROM votos WHERE usuario_id = %s AND votacao_id = %s", (usuario_id, votacao_id))
     if cur.fetchone():
@@ -231,10 +240,10 @@ def votar(votacao_id):
             {% endfor %}
             <br><button type="submit">Votar</button>
         </form>
-        <br><a href="{{ url_for('lista_votacoes') }}">Voltar</a>
+        <br><a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
     """, tema=tema, opcoes=opcoes)
 
-# --- Rota para mostrar resultado de uma votação ---
+# --- Rota para mostrar resultado da votação ---
 @app.route("/resultado/<int:votacao_id>")
 def resultado_votacao(votacao_id):
     if "usuario_id" not in session:
@@ -242,44 +251,35 @@ def resultado_votacao(votacao_id):
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT tema, inicio, fim FROM votacoes WHERE id = %s", (votacao_id,))
+    cur.execute("SELECT tema FROM votacoes WHERE id = %s", (votacao_id,))
     votacao = cur.fetchone()
     if not votacao:
         conn.close()
         return "Votação não encontrada.", 404
-    tema, inicio, fim = votacao
+    tema = votacao[0]
 
     cur.execute("""
-        SELECT op.nome, COUNT(v.id)
-        FROM opcoes op
-        LEFT JOIN votos v ON v.opcao_id = op.id
-        WHERE op.votacao_id = %s
-        GROUP BY op.nome
-        ORDER BY op.nome
+        SELECT opcoes.nome, COUNT(votos.id) AS votos
+        FROM opcoes
+        LEFT JOIN votos ON opcoes.id = votos.opcao_id
+        WHERE opcoes.votacao_id = %s
+        GROUP BY opcoes.nome
+        ORDER BY votos DESC
     """, (votacao_id,))
     resultados = cur.fetchall()
     conn.close()
 
-    max_votos = max([r[1] for r in resultados]) if resultados else 0
-    vencedores = [r[0] for r in resultados if r[1] == max_votos and max_votos > 0]
-
     return render_template_string("""
-        <h2>Resultado da Votação: {{ tema }}</h2>
+        <h2>Resultado da votação: {{ tema }}</h2>
         <ul>
-        {% for nome, total in resultados %}
-            <li>{{ nome }}: {{ total }} voto(s)</li>
-        {% endfor %}
+            {% for nome, votos in resultados %}
+                <li>{{ nome }} - {{ votos }} voto(s)</li>
+            {% endfor %}
         </ul>
-
-        {% if max_votos == 0 %}
-            <p>Nenhum voto registrado.</p>
-        {% else %}
-            <p><strong>Vencedor(es):</strong> {{ vencedores | join(", ") }}</p>
-        {% endif %}
         <br><a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
-    """, tema=tema, resultados=resultados, max_votos=max_votos, vencedores=vencedores)
+    """, tema=tema, resultados=resultados)
 
-# --- Rota do dashboard do administrador ---
+# --- Rota para dashboard administrativo (exemplo simples) ---
 @app.route("/admin")
 def admin_dashboard():
     if "usuario_id" not in session or not session.get("is_admin"):
@@ -291,75 +291,16 @@ def admin_dashboard():
     conn.close()
     return render_template_string("""
         <h2>Administração</h2>
-        <a href="{{ url_for('criar_votacao') }}">Criar nova votação</a><br><br>
-        <h3>Votações Existentes</h3>
+        <p><a href="{{ url_for('logout') }}">Sair</a></p>
+        <h3>Votações cadastradas</h3>
         <ul>
-        {% for v in votacoes %}
-            <li>
-                {{ v[1] }} ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})
-                - <a href="{{ url_for('resultado_votacao', votacao_id=v[0]) }}">Ver Resultado</a>
-            </li>
-        {% endfor %}
+            {% for v in votacoes %}
+                <li>{{ v[1] }} ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})</li>
+            {% endfor %}
         </ul>
-        <br><a href="{{ url_for('logout') }}">Sair</a>
+        <!-- Aqui você pode adicionar formulário para criar novas votações e opções -->
     """, votacoes=votacoes)
-
-# --- Rota para criar votação ---
-@app.route("/admin/criar", methods=["GET", "POST"])
-def criar_votacao():
-    if "usuario_id" not in session or not session.get("is_admin"):
-        abort(403)
-
-    erro = None
-    if request.method == "POST":
-        tema = request.form.get("tema")
-        inicio_str = request.form.get("inicio")
-        fim_str = request.form.get("fim")
-        opcoes_str = request.form.get("opcoes")
-
-        if not tema or not inicio_str or not fim_str or not opcoes_str:
-            erro = "Todos os campos são obrigatórios."
-        else:
-            try:
-                inicio = datetime.strptime(inicio_str, "%Y-%m-%dT%H:%M")
-                fim = datetime.strptime(fim_str, "%Y-%m-%dT%H:%M")
-                if fim <= inicio:
-                    erro = "Data fim deve ser maior que data início."
-                else:
-                    opcoes = [o.strip() for o in opcoes_str.split(",") if o.strip()]
-                    if len(opcoes) < 2:
-                        erro = "Informe pelo menos duas opções separadas por vírgula."
-                    else:
-                        conn = get_db()
-                        cur = conn.cursor()
-                        cur.execute(
-                            "INSERT INTO votacoes (tema, inicio, fim) VALUES (%s, %s, %s) RETURNING id",
-                            (tema, inicio, fim)
-                        )
-                        votacao_id = cur.fetchone()[0]
-                        for opcao in opcoes:
-                            cur.execute(
-                                "INSERT INTO opcoes (votacao_id, nome) VALUES (%s, %s)",
-                                (votacao_id, opcao)
-                            )
-                        conn.commit()
-                        conn.close()
-                        return redirect(url_for("admin_dashboard"))
-            except ValueError:
-                erro = "Formato de data/hora inválido. Use o seletor correto."
-    return render_template_string("""
-        <h2>Criar Nova Votação</h2>
-        <form method="POST">
-            Tema: <input type="text" name="tema" required><br>
-            Início: <input type="datetime-local" name="inicio" required><br>
-            Fim: <input type="datetime-local" name="fim" required><br>
-            Opções (separadas por vírgula): <input type="text" name="opcoes" required><br><br>
-            <button type="submit">Criar</button>
-        </form>
-        {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-        <br><a href="{{ url_for('admin_dashboard') }}">Voltar</a>
-    """, erro=erro)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port

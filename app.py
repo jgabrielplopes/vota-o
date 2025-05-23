@@ -4,7 +4,7 @@ import psycopg2
 import os
 
 app = Flask(__name__)
-app.secret_key = "uma-chave-secreta-segura"
+app.secret_key = os.getenv("SECRET_KEY", "uma-chave-secreta-segura")
 
 # Configuração do PostgreSQL via variáveis de ambiente
 DB_CONFIG = {
@@ -14,8 +14,6 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "port": os.getenv("DB_PORT", "5432")
 }
-
-app.secret_key = os.getenv("SECRET_KEY", "596132")
 
 def get_db():
     return psycopg2.connect(**DB_CONFIG)
@@ -161,7 +159,7 @@ def lista_votacoes():
         <br><a href="{{ url_for('logout') }}">Sair</a>
     """, votacoes_ativas=votacoes_ativas)
 
-# --- Rota para votar numa votação específica (ATUALIZADA) ---
+# --- Rota para votar numa votação específica ---
 @app.route("/votacao/<int:votacao_id>", methods=["GET", "POST"])
 def votar(votacao_id):
     if "usuario_id" not in session or session.get("is_admin"):
@@ -279,7 +277,7 @@ def resultado_votacao(votacao_id):
         <br><a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
     """, tema=tema, resultados=resultados)
 
-# --- Rota para dashboard administrativo (exemplo simples) ---
+# --- Rota para dashboard administrativo ---
 @app.route("/admin")
 def admin_dashboard():
     if "usuario_id" not in session or not session.get("is_admin"):
@@ -298,9 +296,9 @@ def admin_dashboard():
                 <li>{{ v[1] }} ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})</li>
             {% endfor %}
         </ul>
-        <!-- Aqui você pode adicionar formulário para criar novas votações e opções -->
+        <!-- Formulário para criar votações pode ser adicionado aqui -->
     """, votacoes=votacoes)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

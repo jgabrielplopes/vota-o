@@ -13,7 +13,7 @@ DB_CONFIG = {
     "database": "votacao_yh36",
     "user": "votacao_yh36_user",
     "password": "wTvdT9dkt02d3o6AriJb27V9Aen6DAVs",
-    "port": "5432"
+    "port": "5000"
 }
 
 def get_db():

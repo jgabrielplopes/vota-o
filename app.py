@@ -59,6 +59,7 @@ def criar_tabelas():
 
 criar_tabelas()
 
+# --- Rota para login ---
 @app.route("/", methods=["GET", "POST"])
 def index():
     if "usuario_id" in session:
@@ -93,6 +94,7 @@ def index():
         {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
+# --- Rota para cadastro ---
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
@@ -119,11 +121,13 @@ def cadastro():
         {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
+# --- Rota para logout ---
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
 
+# --- Rota para listar votações ativas para o usuário votar ---
 @app.route("/votacoes")
 def lista_votacoes():
     if "usuario_id" not in session or session.get("is_admin"):
@@ -155,6 +159,7 @@ def lista_votacoes():
         <br><a href="{{ url_for('logout') }}">Sair</a>
     """, votacoes_ativas=votacoes_ativas)
 
+# --- Rota para votar numa votação específica ---
 @app.route("/votacao/<int:votacao_id>", methods=["GET", "POST"])
 def votar(votacao_id):
     if "usuario_id" not in session or session.get("is_admin"):
@@ -226,6 +231,7 @@ def votar(votacao_id):
         <br><a href="{{ url_for('lista_votacoes') }}">Voltar</a>
     """, tema=tema, opcoes=opcoes)
 
+# --- Rota para mostrar resultado de uma votação ---
 @app.route("/resultado/<int:votacao_id>")
 def resultado_votacao(votacao_id):
     if "usuario_id" not in session:
@@ -264,3 +270,92 @@ def resultado_votacao(votacao_id):
 
         {% if max_votos == 0 %}
             <p>Nenhum voto registrado.</p>
+        {% else %}
+            <p><strong>Vencedor(es):</strong> {{ vencedores | join(", ") }}</p>
+        {% endif %}
+        <br><a href="{{ url_for('lista_votacoes') }}">Voltar às votações</a>
+    """, tema=tema, resultados=resultados, max_votos=max_votos, vencedores=vencedores)
+
+# --- Rota do dashboard do administrador ---
+@app.route("/admin")
+def admin_dashboard():
+    if "usuario_id" not in session or not session.get("is_admin"):
+        abort(403)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, tema, inicio, fim FROM votacoes ORDER BY inicio DESC")
+    votacoes = cur.fetchall()
+    conn.close()
+    return render_template_string("""
+        <h2>Administração</h2>
+        <a href="{{ url_for('criar_votacao') }}">Criar nova votação</a><br><br>
+        <h3>Votações Existentes</h3>
+        <ul>
+        {% for v in votacoes %}
+            <li>
+                {{ v[1] }} ({{ v[2].strftime('%d/%m/%Y %H:%M') }} - {{ v[3].strftime('%d/%m/%Y %H:%M') }})
+                - <a href="{{ url_for('resultado_votacao', votacao_id=v[0]) }}">Ver Resultado</a>
+            </li>
+        {% endfor %}
+        </ul>
+        <br><a href="{{ url_for('logout') }}">Sair</a>
+    """, votacoes=votacoes)
+
+# --- Rota para criar votação ---
+@app.route("/admin/criar", methods=["GET", "POST"])
+def criar_votacao():
+    if "usuario_id" not in session or not session.get("is_admin"):
+        abort(403)
+
+    erro = None
+    if request.method == "POST":
+        tema = request.form.get("tema")
+        inicio_str = request.form.get("inicio")
+        fim_str = request.form.get("fim")
+        opcoes_str = request.form.get("opcoes")
+
+        if not tema or not inicio_str or not fim_str or not opcoes_str:
+            erro = "Todos os campos são obrigatórios."
+        else:
+            try:
+                inicio = datetime.strptime(inicio_str, "%Y-%m-%dT%H:%M")
+                fim = datetime.strptime(fim_str, "%Y-%m-%dT%H:%M")
+                if fim <= inicio:
+                    erro = "Data fim deve ser maior que data início."
+                else:
+                    opcoes = [o.strip() for o in opcoes_str.split(",") if o.strip()]
+                    if len(opcoes) < 2:
+                        erro = "Informe pelo menos duas opções separadas por vírgula."
+                    else:
+                        conn = get_db()
+                        cur = conn.cursor()
+                        cur.execute(
+                            "INSERT INTO votacoes (tema, inicio, fim) VALUES (%s, %s, %s) RETURNING id",
+                            (tema, inicio, fim)
+                        )
+                        votacao_id = cur.fetchone()[0]
+                        for opcao in opcoes:
+                            cur.execute(
+                                "INSERT INTO opcoes (votacao_id, nome) VALUES (%s, %s)",
+                                (votacao_id, opcao)
+                            )
+                        conn.commit()
+                        conn.close()
+                        return redirect(url_for("admin_dashboard"))
+            except ValueError:
+                erro = "Formato de data/hora inválido. Use o seletor correto."
+    return render_template_string("""
+        <h2>Criar Nova Votação</h2>
+        <form method="POST">
+            Tema: <input type="text" name="tema" required><br>
+            Início: <input type="datetime-local" name="inicio" required><br>
+            Fim: <input type="datetime-local" name="fim" required><br>
+            Opções (separadas por vírgula): <input type="text" name="opcoes" required><br><br>
+            <button type="submit">Criar</button>
+        </form>
+        {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
+        <br><a href="{{ url_for('admin_dashboard') }}">Voltar</a>
+    """, erro=erro)
+
+if __name__ == "__main__":
+    app.run(debug=True)

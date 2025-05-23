@@ -18,7 +18,6 @@ DB_CONFIG = {
 def get_db():
     return psycopg2.connect(**DB_CONFIG)
 
-# Criação das tabelas
 def criar_tabelas():
     conn = get_db()
     cur = conn.cursor()
@@ -42,22 +41,16 @@ def criar_tabelas():
 
 criar_tabelas()
 
-# Página inicial
-@app.route("/")
-def home():
-    return render_template_string("""
-    <h2>Bem-vindo ao Sistema de Votação</h2>
-    <a href="{{ url_for('login') }}">Fazer login</a> |
-    <a href="{{ url_for('cadastro') }}">Cadastrar-se</a>
-    """)
+def dentro_do_horario():
+    agora = datetime.now().time()
+    return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
 
-# Login
-@app.route("/login", methods=["GET", "POST"])
-def login():
+@app.route("/", methods=["GET", "POST"])
+def index():
     if "usuario_id" in session:
         return redirect(url_for("votacao"))
-
     erro = None
+
     if request.method == "POST":
         email = request.form.get("email")
         senha = request.form.get("senha")
@@ -86,7 +79,6 @@ def login():
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
-# Cadastro
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
@@ -100,9 +92,11 @@ def cadastro():
             cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
             conn.commit()
             conn.close()
-            return redirect(url_for("login"))
-        except psycopg2.errors.UniqueViolation:
+            return redirect(url_for("index"))
+        except psycopg2.Error as e:
+            conn.rollback()
             erro = "Email já cadastrado."
+            conn.close()
 
     return render_template_string("""
     <h2>Cadastro</h2>
@@ -111,20 +105,14 @@ def cadastro():
         Senha: <input type="password" name="senha" required><br>
         <button type="submit">Cadastrar</button>
     </form>
-    <p>Já tem conta? <a href="{{ url_for('login') }}">Entrar</a></p>
+    <p>Já tem conta? <a href="{{ url_for('index') }}">Entrar</a></p>
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
-# Verifica horário da votação
-def dentro_do_horario():
-    agora = datetime.now().time()
-    return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
-
-# Votação
 @app.route("/votacao", methods=["GET", "POST"])
 def votacao():
     if "usuario_id" not in session:
-        return redirect(url_for("login"))
+        return redirect(url_for("index"))
 
     usuario_id = session["usuario_id"]
     fora_do_horario = not dentro_do_horario()
@@ -153,16 +141,20 @@ def votacao():
         <p style="color:red">Votação permitida apenas entre 08:00 e 20:00.</p>
     {% else %}
         <form method="POST">
-            <button type="submit" name="voto" value="Partido A">Votar no Partido A</button><br>
-            <button type="submit" name="voto" value="Partido B">Votar no Partido B</button><br>
-            <button type="submit" name="voto" value="Partido C">Votar no Partido C</button><br>
-            <button type="submit" name="voto" value="Abstenções">Abster-se</button>
+            <input type="radio" id="a" name="voto" value="Partido A" required>
+            <label for="a">Partido A</label><br>
+            <input type="radio" id="b" name="voto" value="Partido B">
+            <label for="b">Partido B</label><br>
+            <input type="radio" id="c" name="voto" value="Partido C">
+            <label for="c">Partido C</label><br>
+            <input type="radio" id="abs" name="voto" value="Abstenções">
+            <label for="abs">Abster-se</label><br><br>
+            <button type="submit">Confirmar Voto</button>
         </form>
     {% endif %}
     <br><a href="{{ url_for('resultado') }}">Ver resultado</a>
     """, fora_do_horario=fora_do_horario)
 
-# Resultado
 @app.route("/resultado")
 def resultado():
     conn = get_db()
@@ -197,12 +189,10 @@ def resultado():
     <br><a href="{{ url_for('votacao') }}">Voltar</a>
     """, contagem=contagem, vencedores=vencedores)
 
-# Logout
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return redirect(url_for("index"))
 
-# Iniciar app
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

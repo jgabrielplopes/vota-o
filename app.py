@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session
 from datetime import datetime
 import psycopg2
+import psycopg2.extras
 import os
 
 app = Flask(__name__)
@@ -38,6 +39,7 @@ def criar_tabelas():
         )
     """)
     conn.commit()
+    cur.close()
     conn.close()
 
 criar_tabelas()
@@ -61,6 +63,7 @@ def index():
         cur = conn.cursor()
         cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
         user = cur.fetchone()
+        cur.close()
         conn.close()
 
         if user:
@@ -93,10 +96,14 @@ def cadastro():
             cur = conn.cursor()
             cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
             conn.commit()
+            cur.close()
             conn.close()
             return redirect(url_for("index"))
-        except psycopg2.errors.UniqueViolation:
+        except psycopg2.IntegrityError:
+            conn.rollback()
             erro = "Email já cadastrado."
+            cur.close()
+            conn.close()
 
     return render_template_string("""
     <h2>Cadastro</h2>
@@ -121,6 +128,7 @@ def votacao():
     cur = conn.cursor()
     cur.execute("SELECT id FROM votos WHERE usuario_id = %s", (usuario_id,))
     ja_votou = cur.fetchone()
+    cur.close()
     conn.close()
 
     if ja_votou:
@@ -132,6 +140,7 @@ def votacao():
         cur = conn.cursor()
         cur.execute("INSERT INTO votos (usuario_id, partido) VALUES (%s, %s)", (usuario_id, partido))
         conn.commit()
+        cur.close()
         conn.close()
         return redirect(url_for("resultado"))
 
@@ -156,6 +165,7 @@ def resultado():
     cur = conn.cursor()
     cur.execute("SELECT partido, COUNT(*) FROM votos GROUP BY partido")
     resultados = cur.fetchall()
+    cur.close()
     conn.close()
 
     contagem = {partido: 0 for partido in ["Partido A", "Partido B", "Partido C", "Abstenções"]}

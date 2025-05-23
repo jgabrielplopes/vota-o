@@ -15,6 +15,8 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT", "5432")
 }
 
+app.secret_key = os.getenv("SECRET_KEY", "596132")
+
 def get_db():
     return psycopg2.connect(**DB_CONFIG)
 

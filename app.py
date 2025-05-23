@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 import os
 
@@ -36,41 +36,52 @@ def criar_tabelas():
             data_hora TIMESTAMP DEFAULT NOW()
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS votacao_status (
+            id SERIAL PRIMARY KEY,
+            fim_votacao TIMESTAMP NOT NULL,
+            ativa BOOLEAN DEFAULT TRUE
+        )
+    """)
+    cur.execute("SELECT COUNT(*) FROM votacao_status")
+    if cur.fetchone()[0] == 0:
+        fim = datetime.combine(datetime.now().date(), datetime.strptime("20:00", "%H:%M").time())
+        cur.execute("INSERT INTO votacao_status (fim_votacao, ativa) VALUES (%s, %s)", (fim, True))
     conn.commit()
     conn.close()
 
 criar_tabelas()
 
-def dentro_do_horario():
-    agora = datetime.now().time()
-    return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
+def votacao_ativa():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT fim_votacao, ativa FROM votacao_status ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        fim_votacao, ativa = row
+        return ativa and datetime.now() <= fim_votacao
+    return False
 
-# --- Rota para login ---
 @app.route("/", methods=["GET", "POST"])
 def index():
     if "usuario_id" in session:
-        # Usuário logado vai direto para votação
         return redirect(url_for("votacao"))
     erro = None
-
     if request.method == "POST":
         email = request.form.get("email")
         senha = request.form.get("senha")
-
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
         user = cur.fetchone()
         conn.close()
-
         if user:
-            # Login com sucesso
             session["usuario_id"] = user[0]
             session["email"] = email
             return redirect(url_for("votacao"))
         else:
             erro = "Email ou senha incorretos."
-
     return render_template_string("""
     <h2>Login</h2>
     <form method="POST">
@@ -82,14 +93,12 @@ def index():
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
-# --- Rota para cadastro ---
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
     if request.method == "POST":
         email = request.form.get("email")
         senha = request.form.get("senha")
-
         try:
             conn = get_db()
             cur = conn.cursor()
@@ -99,7 +108,6 @@ def cadastro():
             return redirect(url_for("index"))
         except psycopg2.errors.UniqueViolation:
             erro = "Email já cadastrado."
-
     return render_template_string("""
     <h2>Cadastro</h2>
     <form method="POST">
@@ -111,17 +119,14 @@ def cadastro():
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
-# --- Rota para votação ---
 @app.route("/votacao", methods=["GET", "POST"])
 def votacao():
     if "usuario_id" not in session:
-        # Se não está logado, redireciona para login
         return redirect(url_for("index"))
 
     usuario_id = session["usuario_id"]
-    fora_do_horario = not dentro_do_horario()
+    ativa = votacao_ativa()
 
-    # Verifica se já votou
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT id FROM votos WHERE usuario_id = %s", (usuario_id,))
@@ -129,58 +134,36 @@ def votacao():
 
     if ja_votou:
         conn.close()
-        # Redireciona para resultado se já votou
         return redirect(url_for("resultado"))
 
     if request.method == "POST":
-        if fora_do_horario:
-            # Não permite votar fora do horário
+        if not ativa:
             conn.close()
-            return render_template_string("""
-                <h2>Votação</h2>
-                <p style="color:red">Votação permitida apenas entre 08:00 e 20:00.</p>
-                <a href="{{ url_for('resultado') }}">Ver resultado</a>
-            """)
-
+            return render_template_string("<p style='color:red'>A votação foi encerrada.</p><a href='{{ url_for('resultado') }}'>Ver resultado</a>")
         partido = request.form.get("voto")
-        if partido is None:
-            # Nenhuma opção selecionada
+        if not partido:
             conn.close()
-            return render_template_string("""
-                <h2>Votação</h2>
-                <p style="color:red">Selecione um partido para votar.</p>
-                <a href="{{ url_for('votacao') }}">Voltar</a>
-            """)
-
-        # Registra o voto
+            return render_template_string("<p style='color:red'>Selecione um partido.</p><a href='{{ url_for('votacao') }}'>Voltar</a>")
         cur.execute("INSERT INTO votos (usuario_id, partido) VALUES (%s, %s)", (usuario_id, partido))
         conn.commit()
         conn.close()
         return redirect(url_for("resultado"))
 
     conn.close()
-    # Exibe formulário de votação (com radio buttons e botão para submeter)
     return render_template_string("""
     <h2>Votação</h2>
-    {% if fora_do_horario %}
-        <p style="color:red">Votação permitida apenas entre 08:00 e 20:00.</p>
-    {% else %}
-        <form method="POST">
-            <input type="radio" id="a" name="voto" value="Partido A" required>
-            <label for="a">Partido A</label><br>
-            <input type="radio" id="b" name="voto" value="Partido B">
-            <label for="b">Partido B</label><br>
-            <input type="radio" id="c" name="voto" value="Partido C">
-            <label for="c">Partido C</label><br>
-            <input type="radio" id="abs" name="voto" value="Abstenções">
-            <label for="abs">Abster-se</label><br><br>
-            <button type="submit">Confirmar Voto</button>
-        </form>
+    {% if not ativa %}<p style="color:red">A votação foi encerrada.</p>{% else %}
+    <form method="POST">
+        <input type="radio" name="voto" value="Partido A" required> Partido A<br>
+        <input type="radio" name="voto" value="Partido B"> Partido B<br>
+        <input type="radio" name="voto" value="Partido C"> Partido C<br>
+        <input type="radio" name="voto" value="Abstenções"> Abstenções<br><br>
+        <button type="submit">Confirmar Voto</button>
+    </form>
     {% endif %}
     <br><a href="{{ url_for('resultado') }}">Ver resultado</a>
-    """ , fora_do_horario=fora_do_horario)
+    """, ativa=ativa)
 
-# --- Rota para resultados ---
 @app.route("/resultado")
 def resultado():
     conn = get_db()
@@ -189,37 +172,54 @@ def resultado():
     resultados = cur.fetchall()
     conn.close()
 
-    contagem = {partido: 0 for partido in ["Partido A", "Partido B", "Partido C", "Abstenções"]}
+    contagem = {p: 0 for p in ["Partido A", "Partido B", "Partido C", "Abstenções"]}
     for partido, total in resultados:
         contagem[partido] = total
 
-    max_votos = max(contagem["Partido A"], contagem["Partido B"], contagem["Partido C"])
+    max_votos = max([contagem[p] for p in ["Partido A", "Partido B", "Partido C"]])
     vencedores = [p for p in ["Partido A", "Partido B", "Partido C"] if contagem[p] == max_votos and max_votos > 0]
 
     return render_template_string("""
     <h2>Resultado da Votação</h2>
     <ul>
-        {% for partido, total in contagem.items() %}
-            <li>{{ partido }}: {{ total }} voto(s)</li>
-        {% endfor %}
+    {% for partido, total in contagem.items() %}
+        <li>{{ partido }}: {{ total }} voto(s)</li>
+    {% endfor %}
     </ul>
-
-    {% if vencedores|length == 0 %}
-        <p>Nenhum partido recebeu votos.</p>
-    {% elif vencedores|length == 1 %}
-        <p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
-    {% else %}
-        <p><strong>Empate entre: {{ vencedores | join(', ') }}</strong></p>
+    {% if vencedores|length == 0 %}<p>Nenhum partido recebeu votos.</p>
+    {% elif vencedores|length == 1 %}<p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
+    {% else %}<p><strong>Empate entre: {{ vencedores|join(', ') }}</strong></p>
     {% endif %}
-
     <br><a href="{{ url_for('votacao') }}">Voltar</a> | <a href="{{ url_for('logout') }}">Sair</a>
     """, contagem=contagem, vencedores=vencedores)
 
-# --- Rota para logout ---
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
+@app.route("/admin/resetar", methods=["GET", "POST"])
+def resetar_votacao():
+    senha_admin = "senha123"  # Altere para uma senha forte
+    if request.method == "POST":
+        senha = request.form.get("senha")
+        if senha != senha_admin:
+            return "Senha inválida", 403
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM votos")
+        novo_fim = datetime.now() + timedelta(hours=1)
+        cur.execute("UPDATE votacao_status SET ativa = FALSE")
+        cur.execute("INSERT INTO votacao_status (fim_votacao, ativa) VALUES (%s, %s)", (novo_fim, True))
+        conn.commit()
+        conn.close()
+        return f"Votação resetada! Nova votação vai até: {novo_fim.strftime('%Y-%m-%d %H:%M')}"
+    return """
+    <form method='POST'>
+        Senha Admin: <input type='password' name='senha' required>
+        <button type='submit'>Resetar Votação</button>
+    </form>
+    """
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

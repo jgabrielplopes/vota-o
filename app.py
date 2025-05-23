@@ -1,7 +1,6 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session
 from datetime import datetime
 import psycopg2
-import psycopg2.extras
 import os
 
 app = Flask(__name__)
@@ -39,22 +38,26 @@ def criar_tabelas():
         )
     """)
     conn.commit()
-    cur.close()
     conn.close()
 
 criar_tabelas()
 
-# Verifica horário da votação
-def dentro_do_horario():
-    agora = datetime.now().time()
-    return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
+# Página inicial
+@app.route("/")
+def home():
+    return render_template_string("""
+    <h2>Bem-vindo ao Sistema de Votação</h2>
+    <a href="{{ url_for('login') }}">Fazer login</a> |
+    <a href="{{ url_for('cadastro') }}">Cadastrar-se</a>
+    """)
 
-@app.route("/", methods=["GET", "POST"])
-def index():
+# Login
+@app.route("/login", methods=["GET", "POST"])
+def login():
     if "usuario_id" in session:
         return redirect(url_for("votacao"))
-    erro = None
 
+    erro = None
     if request.method == "POST":
         email = request.form.get("email")
         senha = request.form.get("senha")
@@ -63,7 +66,6 @@ def index():
         cur = conn.cursor()
         cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
         user = cur.fetchone()
-        cur.close()
         conn.close()
 
         if user:
@@ -82,8 +84,9 @@ def index():
     </form>
     <p>Não tem conta? <a href="{{ url_for('cadastro') }}">Cadastrar-se</a></p>
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-    """ , erro=erro)
+    """, erro=erro)
 
+# Cadastro
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
@@ -96,14 +99,10 @@ def cadastro():
             cur = conn.cursor()
             cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
             conn.commit()
-            cur.close()
             conn.close()
-            return redirect(url_for("index"))
-        except psycopg2.IntegrityError:
-            conn.rollback()
+            return redirect(url_for("login"))
+        except psycopg2.errors.UniqueViolation:
             erro = "Email já cadastrado."
-            cur.close()
-            conn.close()
 
     return render_template_string("""
     <h2>Cadastro</h2>
@@ -112,14 +111,20 @@ def cadastro():
         Senha: <input type="password" name="senha" required><br>
         <button type="submit">Cadastrar</button>
     </form>
-    <p>Já tem conta? <a href="{{ url_for('index') }}">Entrar</a></p>
+    <p>Já tem conta? <a href="{{ url_for('login') }}">Entrar</a></p>
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
+# Verifica horário da votação
+def dentro_do_horario():
+    agora = datetime.now().time()
+    return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
+
+# Votação
 @app.route("/votacao", methods=["GET", "POST"])
 def votacao():
     if "usuario_id" not in session:
-        return redirect(url_for("index"))
+        return redirect(url_for("login"))
 
     usuario_id = session["usuario_id"]
     fora_do_horario = not dentro_do_horario()
@@ -128,7 +133,6 @@ def votacao():
     cur = conn.cursor()
     cur.execute("SELECT id FROM votos WHERE usuario_id = %s", (usuario_id,))
     ja_votou = cur.fetchone()
-    cur.close()
     conn.close()
 
     if ja_votou:
@@ -140,7 +144,6 @@ def votacao():
         cur = conn.cursor()
         cur.execute("INSERT INTO votos (usuario_id, partido) VALUES (%s, %s)", (usuario_id, partido))
         conn.commit()
-        cur.close()
         conn.close()
         return redirect(url_for("resultado"))
 
@@ -157,15 +160,15 @@ def votacao():
         </form>
     {% endif %}
     <br><a href="{{ url_for('resultado') }}">Ver resultado</a>
-    """ , fora_do_horario=fora_do_horario)
+    """, fora_do_horario=fora_do_horario)
 
+# Resultado
 @app.route("/resultado")
 def resultado():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT partido, COUNT(*) FROM votos GROUP BY partido")
     resultados = cur.fetchall()
-    cur.close()
     conn.close()
 
     contagem = {partido: 0 for partido in ["Partido A", "Partido B", "Partido C", "Abstenções"]}
@@ -194,10 +197,11 @@ def resultado():
     <br><a href="{{ url_for('votacao') }}">Voltar</a>
     """, contagem=contagem, vencedores=vencedores)
 
+# Logout
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("index"))
+    return redirect(url_for("login"))
 
 # Iniciar app
 if __name__ == "__main__":

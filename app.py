@@ -9,12 +9,14 @@ app.secret_key = "uma-chave-secreta-segura"
 # Configuração do PostgreSQL via variáveis de ambiente
 # Configuração do PostgreSQL com credenciais fixas
 DB_CONFIG = {
-    "host": "dpg-d0n5rvmmcj7s73dl446g-a",
-    "database": "votacao_yh36",
-    "user": "votacao_yh36_user",
-    "password": "wTvdT9dkt02d3o6AriJb27V9Aen6DAVs",
-    "port": "5432"
+    "host": os.getenv("DB_HOST"),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "port": os.getenv("DB_PORT", "5432")
 }
+
+app.secret_key = os.getenv("SECRET_KEY", "596132")
 
 def get_db():
     return psycopg2.connect(**DB_CONFIG)

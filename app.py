@@ -6,7 +6,7 @@ import os
 app = Flask(__name__)
 app.secret_key = "uma-chave-secreta-segura"
 
-# Configuração do PostgreSQL com variáveis de ambiente
+# Configuração do PostgreSQL via variáveis de ambiente
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "database": os.getenv("DB_NAME"),
@@ -45,9 +45,11 @@ def dentro_do_horario():
     agora = datetime.now().time()
     return datetime.strptime("08:00", "%H:%M").time() <= agora <= datetime.strptime("20:00", "%H:%M").time()
 
+# --- Rota para login ---
 @app.route("/", methods=["GET", "POST"])
 def index():
     if "usuario_id" in session:
+        # Usuário logado vai direto para votação
         return redirect(url_for("votacao"))
     erro = None
 
@@ -62,6 +64,7 @@ def index():
         conn.close()
 
         if user:
+            # Login com sucesso
             session["usuario_id"] = user[0]
             session["email"] = email
             return redirect(url_for("votacao"))
@@ -79,6 +82,7 @@ def index():
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
+# --- Rota para cadastro ---
 @app.route("/cadastro", methods=["GET", "POST"])
 def cadastro():
     erro = None
@@ -93,10 +97,8 @@ def cadastro():
             conn.commit()
             conn.close()
             return redirect(url_for("index"))
-        except psycopg2.Error as e:
-            conn.rollback()
+        except psycopg2.errors.UniqueViolation:
             erro = "Email já cadastrado."
-            conn.close()
 
     return render_template_string("""
     <h2>Cadastro</h2>
@@ -109,32 +111,55 @@ def cadastro():
     {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
     """, erro=erro)
 
+# --- Rota para votação ---
 @app.route("/votacao", methods=["GET", "POST"])
 def votacao():
     if "usuario_id" not in session:
+        # Se não está logado, redireciona para login
         return redirect(url_for("index"))
 
     usuario_id = session["usuario_id"]
     fora_do_horario = not dentro_do_horario()
 
+    # Verifica se já votou
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT id FROM votos WHERE usuario_id = %s", (usuario_id,))
     ja_votou = cur.fetchone()
-    conn.close()
 
     if ja_votou:
+        conn.close()
+        # Redireciona para resultado se já votou
         return redirect(url_for("resultado"))
 
-    if request.method == "POST" and not fora_do_horario:
+    if request.method == "POST":
+        if fora_do_horario:
+            # Não permite votar fora do horário
+            conn.close()
+            return render_template_string("""
+                <h2>Votação</h2>
+                <p style="color:red">Votação permitida apenas entre 08:00 e 20:00.</p>
+                <a href="{{ url_for('resultado') }}">Ver resultado</a>
+            """)
+
         partido = request.form.get("voto")
-        conn = get_db()
-        cur = conn.cursor()
+        if partido is None:
+            # Nenhuma opção selecionada
+            conn.close()
+            return render_template_string("""
+                <h2>Votação</h2>
+                <p style="color:red">Selecione um partido para votar.</p>
+                <a href="{{ url_for('votacao') }}">Voltar</a>
+            """)
+
+        # Registra o voto
         cur.execute("INSERT INTO votos (usuario_id, partido) VALUES (%s, %s)", (usuario_id, partido))
         conn.commit()
         conn.close()
         return redirect(url_for("resultado"))
 
+    conn.close()
+    # Exibe formulário de votação (com radio buttons e botão para submeter)
     return render_template_string("""
     <h2>Votação</h2>
     {% if fora_do_horario %}
@@ -153,8 +178,9 @@ def votacao():
         </form>
     {% endif %}
     <br><a href="{{ url_for('resultado') }}">Ver resultado</a>
-    """, fora_do_horario=fora_do_horario)
+    """ , fora_do_horario=fora_do_horario)
 
+# --- Rota para resultados ---
 @app.route("/resultado")
 def resultado():
     conn = get_db()
@@ -186,9 +212,10 @@ def resultado():
         <p><strong>Empate entre: {{ vencedores | join(', ') }}</strong></p>
     {% endif %}
 
-    <br><a href="{{ url_for('votacao') }}">Voltar</a>
+    <br><a href="{{ url_for('votacao') }}">Voltar</a> | <a href="{{ url_for('logout') }}">Sair</a>
     """, contagem=contagem, vencedores=vencedores)
 
+# --- Rota para logout ---
 @app.route("/logout")
 def logout():
     session.clear()

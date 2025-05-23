@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, render_template_string, session
-from datetime import datetime, timedelta
+from datetime import datetime
 import psycopg2
 import os
 
@@ -25,201 +25,178 @@ def criar_tabelas():
         CREATE TABLE IF NOT EXISTS usuarios (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
-            senha TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
+            senha TEXT NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE
+        );
+        CREATE TABLE IF NOT EXISTS votacoes (
+            id SERIAL PRIMARY KEY,
+            tema TEXT NOT NULL,
+            inicio TIMESTAMP NOT NULL,
+            fim TIMESTAMP NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS opcoes (
+            id SERIAL PRIMARY KEY,
+            votacao_id INTEGER REFERENCES votacoes(id),
+            nome TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS votos (
             id SERIAL PRIMARY KEY,
             usuario_id INTEGER REFERENCES usuarios(id),
-            partido TEXT NOT NULL,
-            data_hora TIMESTAMP DEFAULT NOW()
-        )
+            opcao_id INTEGER REFERENCES opcoes(id),
+            votacao_id INTEGER REFERENCES votacoes(id),
+            data_hora TIMESTAMP DEFAULT NOW(),
+            UNIQUE(usuario_id, votacao_id)
+        );
     """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS votacao_status (
-            id SERIAL PRIMARY KEY,
-            fim_votacao TIMESTAMP NOT NULL,
-            ativa BOOLEAN DEFAULT TRUE
-        )
-    """)
-    cur.execute("SELECT COUNT(*) FROM votacao_status")
-    if cur.fetchone()[0] == 0:
-        fim = datetime.combine(datetime.now().date(), datetime.strptime("20:00", "%H:%M").time())
-        cur.execute("INSERT INTO votacao_status (fim_votacao, ativa) VALUES (%s, %s)", (fim, True))
     conn.commit()
     conn.close()
 
 criar_tabelas()
 
-def votacao_ativa():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT fim_votacao, ativa FROM votacao_status ORDER BY id DESC LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        fim_votacao, ativa = row
-        return ativa and datetime.now() <= fim_votacao
-    return False
+# Verifica se está logado
+@app.before_request
+def verificar_login():
+    if request.endpoint not in ("index", "cadastro", "static") and "usuario_id" not in session:
+        return redirect(url_for("index"))
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def index():
-    if "usuario_id" in session:
-        return redirect(url_for("votacao"))
-    erro = None
+    return redirect(url_for("listar_votacoes"))
+
+@app.route("/cadastro", methods=["GET", "POST"])
+def cadastro():
     if request.method == "POST":
-        email = request.form.get("email")
-        senha = request.form.get("senha")
+        email = request.form["email"]
+        senha = request.form["senha"]
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT id FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
+        try:
+            cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
+            conn.commit()
+            return redirect(url_for("login"))
+        except:
+            conn.rollback()
+            return "Erro: email já cadastrado"
+        finally:
+            conn.close()
+    return render_template_string("""
+    <h2>Cadastro</h2>
+    <form method="POST">
+        Email: <input type="email" name="email"><br>
+        Senha: <input type="password" name="senha"><br>
+        <button type="submit">Cadastrar</button>
+    </form>
+    """)
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form["email"]
+        senha = request.form["senha"]
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, is_admin FROM usuarios WHERE email = %s AND senha = %s", (email, senha))
         user = cur.fetchone()
         conn.close()
         if user:
             session["usuario_id"] = user[0]
-            session["email"] = email
-            return redirect(url_for("votacao"))
-        else:
-            erro = "Email ou senha incorretos."
+            session["is_admin"] = user[1]
+            return redirect(url_for("listar_votacoes"))
+        return "Login inválido"
     return render_template_string("""
     <h2>Login</h2>
     <form method="POST">
-        Email: <input type="email" name="email" required><br>
-        Senha: <input type="password" name="senha" required><br>
+        Email: <input type="email" name="email"><br>
+        Senha: <input type="password" name="senha"><br>
         <button type="submit">Entrar</button>
     </form>
-    <p>Não tem conta? <a href="{{ url_for('cadastro') }}">Cadastrar-se</a></p>
-    {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-    """, erro=erro)
-
-@app.route("/cadastro", methods=["GET", "POST"])
-def cadastro():
-    erro = None
-    if request.method == "POST":
-        email = request.form.get("email")
-        senha = request.form.get("senha")
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("INSERT INTO usuarios (email, senha) VALUES (%s, %s)", (email, senha))
-            conn.commit()
-            conn.close()
-            return redirect(url_for("index"))
-        except psycopg2.errors.UniqueViolation:
-            erro = "Email já cadastrado."
-    return render_template_string("""
-    <h2>Cadastro</h2>
-    <form method="POST">
-        Email: <input type="email" name="email" required><br>
-        Senha: <input type="password" name="senha" required><br>
-        <button type="submit">Cadastrar</button>
-    </form>
-    <p>Já tem conta? <a href="{{ url_for('index') }}">Entrar</a></p>
-    {% if erro %}<p style="color:red">{{ erro }}</p>{% endif %}
-    """, erro=erro)
-
-@app.route("/votacao", methods=["GET", "POST"])
-def votacao():
-    if "usuario_id" not in session:
-        return redirect(url_for("index"))
-
-    usuario_id = session["usuario_id"]
-    ativa = votacao_ativa()
-
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM votos WHERE usuario_id = %s", (usuario_id,))
-    ja_votou = cur.fetchone()
-
-    if ja_votou:
-        conn.close()
-        return redirect(url_for("resultado"))
-
-    if request.method == "POST":
-        if not ativa:
-            conn.close()
-            return render_template_string("<p style='color:red'>A votação foi encerrada.</p><a href='{{ url_for('resultado') }}'>Ver resultado</a>")
-        partido = request.form.get("voto")
-        if not partido:
-            conn.close()
-            return render_template_string("<p style='color:red'>Selecione um partido.</p><a href='{{ url_for('votacao') }}'>Voltar</a>")
-        cur.execute("INSERT INTO votos (usuario_id, partido) VALUES (%s, %s)", (usuario_id, partido))
-        conn.commit()
-        conn.close()
-        return redirect(url_for("resultado"))
-
-    conn.close()
-    return render_template_string("""
-    <h2>Votação</h2>
-    {% if not ativa %}<p style="color:red">A votação foi encerrada.</p>{% else %}
-    <form method="POST">
-        <input type="radio" name="voto" value="Partido A" required> Partido A<br>
-        <input type="radio" name="voto" value="Partido B"> Partido B<br>
-        <input type="radio" name="voto" value="Partido C"> Partido C<br>
-        <input type="radio" name="voto" value="Abstenções"> Abstenções<br><br>
-        <button type="submit">Confirmar Voto</button>
-    </form>
-    {% endif %}
-    <br><a href="{{ url_for('resultado') }}">Ver resultado</a>
-    """, ativa=ativa)
-
-@app.route("/resultado")
-def resultado():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT partido, COUNT(*) FROM votos GROUP BY partido")
-    resultados = cur.fetchall()
-    conn.close()
-
-    contagem = {p: 0 for p in ["Partido A", "Partido B", "Partido C", "Abstenções"]}
-    for partido, total in resultados:
-        contagem[partido] = total
-
-    max_votos = max([contagem[p] for p in ["Partido A", "Partido B", "Partido C"]])
-    vencedores = [p for p in ["Partido A", "Partido B", "Partido C"] if contagem[p] == max_votos and max_votos > 0]
-
-    return render_template_string("""
-    <h2>Resultado da Votação</h2>
-    <ul>
-    {% for partido, total in contagem.items() %}
-        <li>{{ partido }}: {{ total }} voto(s)</li>
-    {% endfor %}
-    </ul>
-    {% if vencedores|length == 0 %}<p>Nenhum partido recebeu votos.</p>
-    {% elif vencedores|length == 1 %}<p><strong>Vencedor: {{ vencedores[0] }}</strong></p>
-    {% else %}<p><strong>Empate entre: {{ vencedores|join(', ') }}</strong></p>
-    {% endif %}
-    <br><a href="{{ url_for('votacao') }}">Voltar</a> | <a href="{{ url_for('logout') }}">Sair</a>
-    """, contagem=contagem, vencedores=vencedores)
+    """)
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("index"))
+    return redirect(url_for("login"))
 
-@app.route("/admin/resetar", methods=["GET", "POST"])
-def resetar_votacao():
-    senha_admin = "senha123"  # Altere para uma senha forte
+@app.route("/votacoes")
+def listar_votacoes():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, tema, inicio, fim FROM votacoes ORDER BY fim DESC")
+    votacoes = cur.fetchall()
+    conn.close()
+    return render_template_string("""
+    <h2>Votações Disponíveis</h2>
+    <ul>
+        {% for id, tema, inicio, fim in votacoes %}
+            <li>{{ tema }} - <a href="{{ url_for('votar', votacao_id=id) }}">Votar</a> | <a href="{{ url_for('resultado', votacao_id=id) }}">Resultado</a></li>
+        {% endfor %}
+    </ul>
+    {% if session.get('is_admin') %}<a href="{{ url_for('admin') }}">Painel do Admin</a>{% endif %}
+    <br><a href="{{ url_for('logout') }}">Sair</a>
+    """, votacoes=votacoes)
+
+@app.route("/votacao/<int:votacao_id>", methods=["GET", "POST"])
+def votar(votacao_id):
+    usuario_id = session["usuario_id"]
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT inicio, fim FROM votacoes WHERE id = %s", (votacao_id,))
+    votacao = cur.fetchone()
+    if not votacao:
+        return "Votação não encontrada"
+
+    agora = datetime.now()
+    if agora < votacao[0] or agora > votacao[1]:
+        return "Votação encerrada ou ainda não começou."
+
+    cur.execute("SELECT 1 FROM votos WHERE usuario_id = %s AND votacao_id = %s", (usuario_id, votacao_id))
+    if cur.fetchone():
+        return redirect(url_for("resultado", votacao_id=votacao_id))
+
     if request.method == "POST":
-        senha = request.form.get("senha")
-        if senha != senha_admin:
-            return "Senha inválida", 403
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM votos")
-        novo_fim = datetime.now() + timedelta(hours=1)
-        cur.execute("UPDATE votacao_status SET ativa = FALSE")
-        cur.execute("INSERT INTO votacao_status (fim_votacao, ativa) VALUES (%s, %s)", (novo_fim, True))
+        opcao_id = request.form.get("opcao")
+        cur.execute("INSERT INTO votos (usuario_id, opcao_id, votacao_id) VALUES (%s, %s, %s)",
+                    (usuario_id, opcao_id, votacao_id))
         conn.commit()
         conn.close()
-        return f"Votação resetada! Nova votação vai até: {novo_fim.strftime('%Y-%m-%d %H:%M')}"
-    return """
-    <form method='POST'>
-        Senha Admin: <input type='password' name='senha' required>
-        <button type='submit'>Resetar Votação</button>
+        return redirect(url_for("resultado", votacao_id=votacao_id))
+
+    cur.execute("SELECT id, nome FROM opcoes WHERE votacao_id = %s", (votacao_id,))
+    opcoes = cur.fetchall()
+    conn.close()
+    return render_template_string("""
+    <h2>Votação</h2>
+    <form method="POST">
+        {% for id, nome in opcoes %}
+            <input type="radio" name="opcao" value="{{ id }}" required> {{ nome }}<br>
+        {% endfor %}
+        <button type="submit">Votar</button>
     </form>
-    """
+    """, opcoes=opcoes)
+
+@app.route("/resultado/<int:votacao_id>")
+def resultado(votacao_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT o.nome, COUNT(v.id) as total
+        FROM opcoes o
+        LEFT JOIN votos v ON o.id = v.opcao_id
+        WHERE o.votacao_id = %s
+        GROUP BY o.id
+        ORDER BY total DESC
+    """, (votacao_id,))
+    resultados = cur.fetchall()
+    conn.close()
+    return render_template_string("""
+    <h2>Resultado</h2>
+    <ul>
+        {% for nome, total in resultados %}
+            <li>{{ nome }}: {{ total }} voto(s)</li>
+        {% endfor %}
+    </ul>
+    <a href="{{ url_for('listar_votacoes') }}">Voltar</a>
+    """, resultados=resultados)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
